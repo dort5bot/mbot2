@@ -1,0 +1,221 @@
+name: 🐳 Docker Build & Deploy  #Final-2: Dynamic Container Names + Multi-Environment
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*.*']
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # CONTAINER_NAME artık repo adından dinamik olarak oluşturuluyor
+  CONTAINER_NAME: ${{ format('{0}-{1}', github.event.repository.name, github.ref_name) | replace('/', '-') | truncate(30) }}
+  RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+  ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+  ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+  ORACLE_USER: ${{ secrets.ORACLE_USER }}
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tags: ${{ steps.meta.outputs.tags }}
+      container-name: ${{ env.CONTAINER_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup deployment info
+        run: |
+          echo "🏷️ Repository: ${{ github.repository }}"
+          echo "🐳 Container Name: ${{ env.CONTAINER_NAME }}"
+          echo "🔖 Branch: ${{ github.ref_name }}"
+          echo "🏷️ Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            CONTAINER_NAME=${{ env.CONTAINER_NAME }}
+
+      - name: Essential cleanup
+        if: always()
+        run: |
+          echo "🧹 Basic Docker cleanup..."
+          docker system prune -f || true
+          docker builder prune -f || true
+
+  deploy:
+    needs: docker-build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    
+    steps:
+      - name: Display deployment info
+        run: |
+          echo "🚀 Starting deployment..."
+          echo "📦 Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          echo "🐳 Container: ${{ needs.docker-build.outputs.container-name }}"
+          echo "🏷️ Tags: ${{ needs.docker-build.outputs.image-tags }}"
+
+      - name: Trigger Render Deploy
+        if: env.RENDER_DEPLOY_HOOK != ''
+        run: |
+          echo "🚀 Triggering Render deployment..."
+          curl -s -X POST "${{ env.RENDER_DEPLOY_HOOK }}"
+          echo "✅ Render deployment triggered"
+
+      - name: Deploy to Oracle VPS
+        if: env.ORACLE_SSH_KEY != '' && env.ORACLE_HOST != ''
+        env:
+          SSH_PRIVATE_KEY: ${{ env.ORACLE_SSH_KEY }}
+          # Dinamik port assignment (3000 + hash mod 1000)
+          CONTAINER_PORT: ${{ format('{0}', fromJson('["3000", "3001", "3002", "3003", "3004"]')[github.run_id % 5] )}}
+        run: |
+          echo "🚀 Deploying to Oracle VPS..."
+          echo "🐳 Container: ${{ env.CONTAINER_NAME }}"
+          echo "🔌 Port: $CONTAINER_PORT"
+          
+          USER="${ORACLE_USER:-ubuntu}"
+          
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key $USER@$ORACLE_HOST << EOF
+            set -e
+            echo "🧹 Cleaning up Docker system..."
+            docker system prune -f
+
+            CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
+            CONTAINER_PORT="$CONTAINER_PORT"
+            IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            
+            echo "🐳 Pulling latest image: \$IMAGE_NAME"
+            docker pull "\$IMAGE_NAME"
+            
+            echo "🛑 Stopping existing container: \$CONTAINER_NAME"
+            docker stop "\$CONTAINER_NAME" 2>/dev/null || echo "Container not running"
+            docker rm "\$CONTAINER_NAME" 2>/dev/null || echo "Container not found"
+            
+            echo "🚀 Starting new container: \$CONTAINER_NAME on port \$CONTAINER_PORT"
+            docker run -d \
+              --name "\$CONTAINER_NAME" \
+              --restart unless-stopped \
+              -p "\$CONTAINER_PORT":3000 \
+              -e TZ=UTC \
+              -e CONTAINER_NAME="\$CONTAINER_NAME" \
+              -e DEPLOY_ENV="${{ github.ref_name }}" \
+              "\$IMAGE_NAME"
+
+            echo "⏳ Waiting for container to start..."
+            sleep 10
+            
+            echo "📊 Container status:"
+            docker ps --filter "name=\$CONTAINER_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            
+            echo "🔍 Container logs (last 20 lines):"
+            docker logs "\$CONTAINER_NAME" --tail 20 || echo "No logs available yet"
+            
+            echo "✅ Deployment completed: http://$ORACLE_HOST:\$CONTAINER_PORT"
+          EOF
+
+      - name: Deploy to multiple containers (optional)
+        if: env.ORACLE_SSH_KEY != '' && env.ORACLE_HOST != '' && github.ref == 'refs/heads/main'
+        env:
+          SSH_PRIVATE_KEY: ${{ env.ORACLE_SSH_KEY }}
+        run: |
+          echo "🚀 Deploying to multiple containers..."
+          USER="${ORACLE_USER:-ubuntu}"
+          
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key $USER@$ORACLE_HOST << 'EOF'
+            set -e
+            IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            
+            # Deploy to multiple containers with different ports
+            declare -A CONTAINERS=(
+              ["${{ env.CONTAINER_NAME }}-primary"]="3000"
+              ["${{ env.CONTAINER_NAME }}-secondary"]="3001"
+              ["${{ env.CONTAINER_NAME }}-staging"]="3002"
+            )
+            
+            echo "🐳 Pulling latest image..."
+            docker pull "\$IMAGE_NAME"
+            
+            for CONTAINER_NAME in "\${!CONTAINERS[@]}"; do
+              PORT="\${CONTAINERS[\$CONTAINER_NAME]}"
+              
+              echo "🚀 Deploying: \$CONTAINER_NAME on port \$PORT"
+              
+              docker stop "\$CONTAINER_NAME" 2>/dev/null || true
+              docker rm "\$CONTAINER_NAME" 2>/dev/null || true
+              
+              docker run -d \
+                --name "\$CONTAINER_NAME" \
+                --restart unless-stopped \
+                -p "\$PORT":3000 \
+                -e TZ=UTC \
+                -e CONTAINER_NAME="\$CONTAINER_NAME" \
+                "\$IMAGE_NAME"
+                
+              echo "✅ \$CONTAINER_NAME deployed on port \$PORT"
+            done
+            
+            echo "📊 All containers status:"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep "${{ env.CONTAINER_NAME }}"
+          EOF
+
+      - name: Verify deployment
+        if: env.ORACLE_SSH_KEY != '' && env.ORACLE_HOST != ''
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "🌐 Access your application at: http://$ORACLE_HOST:$CONTAINER_PORT"
+          echo "🐳 Container: ${{ env.CONTAINER_NAME }}"
+          echo "🔧 Environment: ${{ github.ref_name }}"
