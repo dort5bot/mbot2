@@ -3,6 +3,8 @@ handlers/analiz_handler.py - Geliştirilmiş Analiz Handler
 """
 
 import logging
+import asyncio  # EKLENDİ
+import re  # EKLENDİ - daha iyi validasyon için
 from typing import Optional
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardRemove
@@ -56,23 +58,40 @@ async def get_analyzer() -> Optional[any]:
     
     return _analyzer
 
+def validate_symbol(symbol: str) -> bool:
+    """Geliştirilmiş sembol validasyonu"""
+    # Binance sembol formatı: 3-10 karakter, sadece harf ve sayı
+    if not re.match(r'^[A-Z0-9]{3,10}$', symbol):
+        return False
+    
+    # Yaygın trading çiftleri kontrolü
+    common_pairs = ['USDT', 'BUSD', 'BTC', 'ETH']
+    if not any(pair in symbol for pair in common_pairs):
+        logger.warning(f"Olağandışı sembol: {symbol}")
+    
+    return True
+
 @router.message(Command("analysis", "analiz", "a"))
 async def start_analysis(message: Message, state: FSMContext):
     """Analiz başlatma"""
-    analyzer = await get_analyzer()
-    if not analyzer:
-        await message.answer("❌ Analiz modülü başlatılamadı. Lütfen config kontrol edin.")
-        return
-    
-    await message.answer(
-        "📊 **Analiz Modülü**\n\n"
-        "Lütfen analiz yapmak istediğiniz sembolü girin:\n"
-        "Örnek: `BTCUSDT`, `ETHUSDT`\n\n"
-        "İptal için /cancel",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    await state.set_state(AnalysisStates.waiting_symbol)
+    try:
+        analyzer = await get_analyzer()
+        if not analyzer:
+            await message.answer("❌ Analiz modülü başlatılamadı. Lütfen config kontrol edin.")
+            return
+        
+        await message.answer(
+            "📊 **Analiz Modülü**\n\n"
+            "Lütfen analiz yapmak istediğiniz sembolü girin:\n"
+            "Örnek: `BTCUSDT`, `ETHUSDT`\n\n"
+            "İptal için /cancel",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await state.set_state(AnalysisStates.waiting_symbol)
+    except Exception as e:
+        logger.error(f"Analiz başlatma hatası: {e}")
+        await message.answer("❌ Analiz modülüne erişilemedi")
 
 @router.message(Command("t"))
 async def quick_analysis(message: Message):
@@ -94,13 +113,27 @@ async def quick_analysis(message: Message):
             await message.answer("❌ Analiz modülü hazır değil")
             return
 
+        # Sembol validasyonu
+        valid_symbols = [s for s in symbols[:3] if validate_symbol(s)]  # Maksimum 3 sembol
+        if not valid_symbols:
+            await message.answer("❌ Geçerli sembol bulunamadı")
+            return
+
         results = []
-        for symbol in symbols[:3]:  # Maksimum 3 sembol
-            await message.answer(f"🔍 `{symbol}` analiz ediliyor...", parse_mode="Markdown")
-            
+        for symbol in valid_symbols:
             try:
-                result = await analyzer.run_analysis(symbol)
+                await message.answer(f"🔍 `{symbol}` analiz ediliyor...", parse_mode="Markdown")
+                
+                # Timeout ile analiz
+                result = await asyncio.wait_for(
+                    analyzer.run_analysis(symbol), 
+                    timeout=45.0
+                )
                 results.append((symbol, result))
+            except asyncio.TimeoutError:
+                logger.warning(f"Analiz timeout: {symbol}")
+                await message.answer(f"⏰ `{symbol}` analiz zaman aşımına uğradı")
+                results.append((symbol, None))
             except Exception as e:
                 logger.error(f"Analiz hatası {symbol}: {e}")
                 results.append((symbol, None))
@@ -114,8 +147,12 @@ async def quick_analysis(message: Message):
                 continue
                 
             # Skor renk emojisi
-            score_emoji = "🟢" if result.gnosis_signal > 0.3 else \
-                         "🔴" if result.gnosis_signal < -0.3 else "🟡"
+            if result.gnosis_signal > 0.3:
+                score_emoji = "🟢"
+            elif result.gnosis_signal < -0.3:
+                score_emoji = "🔴"
+            else:
+                score_emoji = "🟡"
             
             response += (
                 f"{score_emoji} **{symbol}**\n"
@@ -143,29 +180,41 @@ async def multi_analysis(message: Message):
         else:
             symbols = [s.strip().upper() for s in args[1].split(',')]
         
+        # Sembol validasyonu
+        valid_symbols = [s for s in symbols[:5] if validate_symbol(s)]  # Maksimum 5 sembol
+        if not valid_symbols:
+            await message.answer("❌ Geçerli sembol bulunamadı")
+            return
+        
         analyzer = await get_analyzer()
         if not analyzer:
             await message.answer("❌ Analiz modülü hazır değil")
             return
         
-        await message.answer(f"🔍 {len(symbols)} sembol analiz ediliyor...")
+        await message.answer(f"🔍 {len(valid_symbols)} sembol analiz ediliyor...")
         
-        # Paralel analiz
+        # Paralel analiz with timeout
         tasks = []
-        for symbol in symbols[:5]:  # Maksimum 5 sembol
-            tasks.append(analyzer.run_analysis(symbol))
+        for symbol in valid_symbols:
+            task = asyncio.wait_for(analyzer.run_analysis(symbol), timeout=45.0)
+            tasks.append(task)
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Sırala (skora göre)
         sorted_results = []
         for i, result in enumerate(results):
+            symbol = valid_symbols[i]
             if isinstance(result, Exception):
-                logger.error(f"Analiz hatası {symbols[i]}: {result}")
+                logger.error(f"Analiz hatası {symbol}: {result}")
                 continue
-            sorted_results.append((symbols[i], result))
+            sorted_results.append((symbol, result))
         
         sorted_results.sort(key=lambda x: x[1].gnosis_signal, reverse=True)
+        
+        if not sorted_results:
+            await message.answer("❌ Hiçbir sembol için analiz tamamlanamadı")
+            return
         
         # Formatlı response
         response = "🏆 **SIRALI ANALİZ SONUÇLARI**\n\n"
@@ -181,16 +230,16 @@ async def multi_analysis(message: Message):
         
     except Exception as e:
         logger.error(f"Çoklu analiz hatası: {e}")
-        await message.answer("❌ Çoklu analiz hatası")
+        await message.answer("❌ Çoklu analiz sırasında hata oluştu")
 
 @router.message(StateFilter(AnalysisStates.waiting_symbol))
 async def process_symbol(message: Message, state: FSMContext):
     """Sembol işleme"""
     symbol = message.text.upper().strip()
     
-    # Sembol validasyonu
-    if not all(c.isalnum() or c in ['/', '-', '_'] for c in symbol):
-        await message.answer("❌ Geçersiz sembol formatı. Örnek: BTCUSDT")
+    # Geliştirilmiş sembol validasyonu
+    if not validate_symbol(symbol):
+        await message.answer("❌ Geçersiz sembol formatı. Örnek: BTCUSDT, ETHUSDT")
         return
     
     await state.update_data(symbol=symbol)
@@ -203,7 +252,11 @@ async def process_symbol(message: Message, state: FSMContext):
     
     try:
         analyzer = await get_analyzer()
-        result = await analyzer.run_analysis(symbol)
+        # Timeout ile analiz
+        result = await asyncio.wait_for(
+            analyzer.run_analysis(symbol), 
+            timeout=45.0
+        )
         
         # Detaylı response
         response = (
@@ -215,7 +268,12 @@ async def process_symbol(message: Message, state: FSMContext):
         )
         
         for module, score in result.module_scores.items():
-            module_icon = "🟢" if score > 0.3 else "🔴" if score < -0.3 else "🟡"
+            if score > 0.3:
+                module_icon = "🟢"
+            elif score < -0.3:
+                module_icon = "🔴"
+            else:
+                module_icon = "🟡"
             response += f"{module_icon} {module}: `{score:.3f}`\n"
         
         response += f"\n✅ **Öneri**: `{result.recommendation}`\n"
@@ -224,6 +282,8 @@ async def process_symbol(message: Message, state: FSMContext):
         
         await message.answer(response, parse_mode="Markdown")
         
+    except asyncio.TimeoutError:
+        await message.answer("❌ Analiz zaman aşımına uğradı. Lütfen tekrar deneyin.")
     except Exception as e:
         logger.error(f"Analiz hatası: {e}")
         await message.answer("❌ Analiz sırasında hata oluştu")
@@ -233,6 +293,11 @@ async def process_symbol(message: Message, state: FSMContext):
 @router.message(Command("cancel"))
 async def cancel_analysis(message: Message, state: FSMContext):
     """Analizi iptal et"""
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("❌ İptal edilecek işlem bulunamadı")
+        return
+        
     await state.clear()
     await message.answer("❌ Analiz iptal edildi", reply_markup=ReplyKeyboardRemove())
 
