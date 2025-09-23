@@ -245,7 +245,7 @@ class RiskManager:
     # -------------------------
     # MEVCUT RISK METRIKLERI 
     # -------------------------
-]
+
 
     async def compute_atr(self, symbol: str, interval: str = "1h", futures: bool = False) -> float:
         """Average True Range hesaplama (placeholder implementation)"""
