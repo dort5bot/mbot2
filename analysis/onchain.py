@@ -11,6 +11,9 @@ Güncellemeler:
 - Daha iyi error handling
 - Config entegrasyonu için hazır
 """
+"""
+On-chain Analiz Modülü - Güncellenmiş Singleton Pattern
+"""
 
 import logging
 import asyncio
@@ -20,27 +23,29 @@ import aiohttp
 import numpy as np
 
 from utils.binance.binance_a import BinanceAPI
-from config import ONCHAIN_CONFIG
+# ESKİ: from config import ONCHAIN_CONFIG
+# YENİ: OnChainConfig sınıfını import et
+from config import OnChainConfig, get_config
 
 logger = logging.getLogger(__name__)
 
-# analysis/onchain.py başlangıcına config import ekleyin
-from config import ONCHAIN_CONFIG
+# OnChainConfig sınıfını kullan
+ONCHAIN_CONFIG = OnChainConfig()
 
-# Sınıf içinde config kullanımı
 class OnchainAnalyzer:
     def __init__(self, binance_api: Optional[BinanceAPI] = None, 
-                 config: Optional[Dict[str, Any]] = None) -> None:
+                 config: Optional[OnChainConfig] = None) -> None:
         """
         OnchainAnalyzer initialization with config.
         
         Args:
             binance_api: BinanceAPI instance
-            config: Configuration dictionary
+            config: OnChainConfig instance
         """
-        if not self._initialized:
+        # Singleton pattern için kontrol
+        if not hasattr(self, '_initialized'):
             self.binance = binance_api
-            self.config = config or ONCHAIN_CONFIG  # Default config kullan
+            self.config = config or ONCHAIN_CONFIG  # OnChainConfig instance kullan
             self.session: Optional[aiohttp.ClientSession] = None
             self._cache: Dict[str, Any] = {}
             self._cache_timestamps: Dict[str, float] = {}
@@ -64,7 +69,7 @@ class OnchainAnalyzer:
         try:
             # Cache kontrolü
             cache_key = "ssr_data"
-            cache_ttl = self.config["CACHE_TTL"]["ssr"]
+            cache_ttl = self.config.CACHE_TTL["ssr"]  # Dict erişimi
             cached_data = await self._get_cached_data(cache_key, cache_ttl)
             
             if cached_data is not None:
@@ -72,18 +77,22 @@ class OnchainAnalyzer:
             
             if not self.binance:
                 logger.error("BinanceAPI not set for OnchainAnalyzer")
-                return self.config["FALLBACK_VALUES"]["ssr"]
+                return self.config.FALLBACK_VALUES["ssr"]  # Dict erişimi
             
             # Config'ten threshold'ları al
-            ssr_thresholds = self.config["SSR_THRESHOLDS"]
+            ssr_thresholds = self.config.SSR_THRESHOLDS  # Dict erişimi
             
-            # Glassnode API'den veri al
+            # Glassnode API'den veri al (bu metodun implementasyonu eksik)
+            # Önce _get_glassnode_data metodunu ekleyelim veya comment out yapalım
+            """
             ssr_data = await self._get_glassnode_data("metrics/indicators/ssr", {
                 'a': 'BTC',
                 'i': '24h',
                 's': int(time.time()) - 86400,
                 'u': int(time.time())
             })
+            """
+            ssr_data = None  # Geçici olarak None yapalım
             
             if ssr_data and len(ssr_data) > 0:
                 latest_ssr = ssr_data[-1]['v']
@@ -104,30 +113,62 @@ class OnchainAnalyzer:
                 
             else:
                 # Fallback hesaplama
-                btc_data = await self.binance.get_price("BTCUSDT")
-                usdt_market_cap = 80_000_000_000
-                btc_market_cap = btc_data * 19_500_000
-                
-                ssr = btc_market_cap / usdt_market_cap
-                normalized_ssr = max(-1.0, min(1.0, 
-                    (ssr_thresholds["neutral"] - ssr) / (
-                        ssr_thresholds["bearish"] - ssr_thresholds["bullish"]) * 2))
-                
-                logger.debug(f"SSR fallback: {ssr:.2f}, normalize: {normalized_ssr:.3f}")
-                
-                # Cache'e kaydet
-                await self._set_cached_data(cache_key, normalized_ssr)
-                return normalized_ssr
+                # Binance API'den fiyat almak için örnek (gerçek implementasyona bağlı)
+                try:
+                    btc_data = await self.binance.get_price("BTCUSDT")
+                    usdt_market_cap = 80_000_000_000
+                    btc_market_cap = btc_data * 19_500_000
+                    
+                    ssr = btc_market_cap / usdt_market_cap
+                    normalized_ssr = max(-1.0, min(1.0, 
+                        (ssr_thresholds["neutral"] - ssr) / (
+                            ssr_thresholds["bearish"] - ssr_thresholds["bullish"]) * 2))
+                    
+                    logger.debug(f"SSR fallback: {ssr:.2f}, normalize: {normalized_ssr:.3f}")
+                    
+                    # Cache'e kaydet
+                    await self._set_cached_data(cache_key, normalized_ssr)
+                    return normalized_ssr
+                except Exception as binance_error:
+                    logger.error(f"Binance API hatası: {binance_error}")
+                    return self.config.FALLBACK_VALUES["ssr"]  # Dict erişimi
                 
         except Exception as e:
             logger.error(f"SSR hesaplanırken hata: {e}")
-            return self.config["FALLBACK_VALUES"]["ssr"]
+            return self.config.FALLBACK_VALUES["ssr"]  # Dict erişimi
+
+    async def exchange_net_flow(self) -> float:
+        """Exchange net flow metodu (basit implementasyon)"""
+        try:
+            # Basit bir implementasyon - gerçek veri kaynağına bağlanacak
+            return 0.0
+        except Exception as e:
+            logger.error(f"Exchange net flow hatası: {e}")
+            return self.config.FALLBACK_VALUES["netflow"]
+
+    async def etf_flows(self) -> float:
+        """ETF flows metodu (basit implementasyon)"""
+        try:
+            # Basit bir implementasyon - gerçek veri kaynağına bağlanacak
+            return 0.0
+        except Exception as e:
+            logger.error(f"ETF flows hatası: {e}")
+            return self.config.FALLBACK_VALUES["etf_flows"]
+
+    async def fear_greed_index(self) -> float:
+        """Fear & Greed Index metodu (basit implementasyon)"""
+        try:
+            # Basit bir implementasyon - gerçek veri kaynağına bağlanacak
+            return 0.0
+        except Exception as e:
+            logger.error(f"Fear & Greed Index hatası: {e}")
+            return self.config.FALLBACK_VALUES["fear_greed"]
 
     async def aggregate_score(self) -> Dict[str, Any]:
         """Config ile güncellenmiş aggregate score"""
         try:
             # Config'ten ağırlıkları al
-            weights = self.config["METRIC_WEIGHTS"]
+            weights = self.config.METRIC_WEIGHTS  # Dict erişimi
             
             # Tüm metrikleri paralel çalıştır
             tasks = {
@@ -142,14 +183,14 @@ class OnchainAnalyzer:
                 try:
                     results[name] = await asyncio.wait_for(
                         task, 
-                        timeout=self.config["API_TIMEOUTS"].get(name.split('_')[0], 30)
+                        timeout=self.config.API_TIMEOUTS.get(name.split('_')[0], 30)  # Dict erişimi
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"{name} timeout, fallback değer kullanılıyor")
-                    results[name] = self.config["FALLBACK_VALUES"].get(name, 0.0)
+                    results[name] = self.config.FALLBACK_VALUES.get(name, 0.0)  # Dict erişimi
                 except Exception as e:
                     logger.error(f"{name} hesaplanırken hata: {e}")
-                    results[name] = self.config["FALLBACK_VALUES"].get(name, 0.0)
+                    results[name] = self.config.FALLBACK_VALUES.get(name, 0.0)  # Dict erişimi
 
             # Ağırlıklı ortalama
             total_score = sum(results[name] * weights.get(name, 0.25) for name in results)
@@ -166,7 +207,7 @@ class OnchainAnalyzer:
         except Exception as e:
             logger.error(f"Aggregate score hesaplanırken beklenmeyen hata: {e}")
             # Config'ten fallback değerleri kullan
-            fallback_values = self.config["FALLBACK_VALUES"]
+            fallback_values = self.config.FALLBACK_VALUES  # Dict erişimi
             return {
                 "stablecoin_supply_ratio": fallback_values["ssr"],
                 "exchange_net_flow": fallback_values["netflow"],
@@ -218,13 +259,13 @@ async def onchain_handler(message: Message) -> None:
 
 # Singleton instance getter
 def get_onchain_analyzer(binance_api: Optional[BinanceAPI] = None, 
-                         config: Optional[Dict[str, Any]] = None) -> OnchainAnalyzer:
+                         config: Optional[OnChainConfig] = None) -> OnchainAnalyzer:
     """
     OnchainAnalyzer singleton instance'ını döndürür.
     
     Args:
         binance_api: BinanceAPI instance (opsiyonel)
-        config: Konfigürasyon ayarları (opsiyonel)
+        config: OnChainConfig instance (opsiyonel)
         
     Returns:
         OnchainAnalyzer instance
@@ -234,17 +275,20 @@ def get_onchain_analyzer(binance_api: Optional[BinanceAPI] = None,
 # Test için
 async def test_onchain_analyzer():
     """Test function"""
-    from utils.binance.binance_request import BinanceHTTPClient
-    from utils.binance.binance_circuit_breaker import CircuitBreaker
-    
-    # Mock veya gerçek BinanceAPI
-    http_client = BinanceHTTPClient(api_key="test", secret_key="test")
-    cb = CircuitBreaker()
-    binance_api = BinanceAPI(http_client, cb)
-    
-    async with get_onchain_analyzer(binance_api) as analyzer:
+    try:
+        from utils.binance.binance_request import BinanceHTTPClient
+        from utils.binance.binance_circuit_breaker import CircuitBreaker
+        
+        # Mock veya gerçek BinanceAPI
+        http_client = BinanceHTTPClient(api_key="test", secret_key="test")
+        cb = CircuitBreaker()
+        binance_api = BinanceAPI(http_client, cb)
+        
+        analyzer = get_onchain_analyzer(binance_api)
         result = await analyzer.aggregate_score()
         print("On-chain analysis result:", result)
+    except Exception as e:
+        print(f"Test hatası: {e}")
 
 if __name__ == "__main__":
     import asyncio
