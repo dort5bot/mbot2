@@ -11,9 +11,7 @@ Güncellemeler:
 - Daha iyi error handling
 - Config entegrasyonu için hazır
 """
-"""
-On-chain Analiz Modülü - Güncellenmiş Singleton Pattern
-"""
+
 
 import logging
 import asyncio
@@ -293,3 +291,4 @@ async def test_onchain_analyzer():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(test_onchain_analyzer())
+
