@@ -1,4 +1,4 @@
-name: 🐳 Docker Build & Deploy  #Final-2: Dynamic Container Names + Multi-Environment+
+name: 🐳 Docker Build & Deploy  #Final-3: Dynamic Container Names + Multi-Environment+
 
 on:
   push:
@@ -14,8 +14,6 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # CONTAINER_NAME artık repo adından dinamik olarak oluşturuluyor
-  CONTAINER_NAME: ${{ format('{0}-{1}', github.event.repository.name, github.ref_name) | replace('/', '-') | truncate(30) }}
   RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
   ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
   ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
@@ -36,6 +34,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ✅ Dinamik container adı güvenli şekilde üretiliyor
+      - name: Generate container name
+        run: |
+          NAME="${GITHUB_REPOSITORY#*/}-${GITHUB_REF_NAME}"
+          NAME=$(echo "$NAME" | tr '/' '-' | cut -c1-30)
+          echo "CONTAINER_NAME=$NAME" >> $GITHUB_ENV
 
       - name: Setup deployment info
         run: |
@@ -78,11 +83,13 @@ jobs:
           build-args: |
             CONTAINER_NAME=${{ env.CONTAINER_NAME }}
 
+      # ✅ Daha güvenli temizlik (sadece gereksiz image + container’ları siliyor)
       - name: Essential cleanup
         if: always()
         run: |
           echo "🧹 Basic Docker cleanup..."
-          docker system prune -f || true
+          docker container prune -f || true
+          docker image prune -f || true
           docker builder prune -f || true
 
   deploy:
@@ -103,15 +110,19 @@ jobs:
         if: env.RENDER_DEPLOY_HOOK != ''
         run: |
           echo "🚀 Triggering Render deployment..."
-          curl -s -X POST "${{ env.RENDER_DEPLOY_HOOK }}"
+          curl -i -X POST "${{ env.RENDER_DEPLOY_HOOK }}"
           echo "✅ Render deployment triggered"
+
+      # ✅ Port seçimi artık global environment’a set ediliyor
+      - name: Set global container port
+        run: |
+          PORT=$(jq -nc --argjson idx $(( GITHUB_RUN_ID % 5 )) '["3000","3001","3002","3003","3004"][$idx]')
+          echo "CONTAINER_PORT=$PORT" >> $GITHUB_ENV
 
       - name: Deploy to Oracle VPS
         if: env.ORACLE_SSH_KEY != '' && env.ORACLE_HOST != ''
         env:
           SSH_PRIVATE_KEY: ${{ env.ORACLE_SSH_KEY }}
-          # Dinamik port assignment (3000 + hash mod 1000)
-          CONTAINER_PORT: ${{ format('{0}', fromJson('["3000", "3001", "3002", "3003", "3004"]')[github.run_id % 5] )}}
         run: |
           echo "🚀 Deploying to Oracle VPS..."
           echo "🐳 Container: ${{ env.CONTAINER_NAME }}"
@@ -127,7 +138,8 @@ jobs:
           ssh -i ~/.ssh/deploy_key $USER@$ORACLE_HOST << EOF
             set -e
             echo "🧹 Cleaning up Docker system..."
-            docker system prune -f
+            docker container prune -f || true
+            docker image prune -f || true
 
             CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
             CONTAINER_PORT="$CONTAINER_PORT"
@@ -209,7 +221,7 @@ jobs:
             done
             
             echo "📊 All containers status:"
-            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep "${{ env.CONTAINER_NAME }}"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep "\${IMAGE_NAME}"
           EOF
 
       - name: Verify deployment
@@ -219,3 +231,6 @@ jobs:
           echo "🌐 Access your application at: http://$ORACLE_HOST:$CONTAINER_PORT"
           echo "🐳 Container: ${{ env.CONTAINER_NAME }}"
           echo "🔧 Environment: ${{ github.ref_name }}"
+          
+          echo "📊 Running containers:"
+          ssh -i ~/.ssh/deploy_key ${ORACLE_USER:-ubuntu}@$ORACLE_HOST "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
