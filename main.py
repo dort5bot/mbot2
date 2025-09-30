@@ -208,6 +208,7 @@ async def start_polling() -> None:
 # ---------------------------------------------------------------------
 # Binance API Initialization Function
 # ---------------------------------------------------------------------
+
 async def initialize_binance_api() -> Optional[Any]:
     """
     Initialize Binance API with proper factory pattern.
@@ -227,16 +228,8 @@ async def initialize_binance_api() -> Optional[Any]:
     try:
         logger.info("🔄 Initializing Binance API...")
         
-        # ✅ DÜZELTME: Factory fonksiyonunu kullan
-        binance_api_instance = await get_or_create_binance_api(
-            api_key=app_config.BINANCE_API_KEY,
-            api_secret=app_config.BINANCE_API_SECRET,
-            base_url=app_config.BINANCE_BASE_URL,
-            fapi_url=app_config.BINANCE_FAPI_URL,
-            cache_ttl=30,
-            failure_threshold=getattr(app_config, 'CIRCUIT_BREAKER_FAILURE_THRESHOLD', 5),
-            reset_timeout=getattr(app_config, 'CIRCUIT_BREAKER_RESET_TIMEOUT', 30)
-        )
+        # ✅ Async çağrı ve user_id parametresi
+        binance_api_instance = await get_or_create_binance_api(user_id=None)
         
         logger.info("✅ Binance API initialized successfully")
         return binance_api_instance
@@ -244,6 +237,7 @@ async def initialize_binance_api() -> Optional[Any]:
     except Exception as e:
         logger.error(f"❌ Binance API initialization failed: {e}")
         raise
+
 
 # ---------------------------------------------------------------------
 # Handler Loading with Debug Information

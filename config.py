@@ -119,6 +119,10 @@ class BotConfig:
         int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
     ])
     
+    # 🔐 ENCRYPTION SETTINGS
+    MASTER_KEY: str = field(default_factory=lambda: os.getenv("MASTER_KEY", ""))
+    
+    
     # Webhook settings
     USE_WEBHOOK: bool = field(default_factory=lambda: os.getenv("USE_WEBHOOK", "false").lower() == "true")
     WEBHOOK_HOST: str = field(default_factory=lambda: os.getenv("WEBHOOK_HOST", ""))
